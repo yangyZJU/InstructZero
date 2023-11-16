@@ -10,7 +10,6 @@ import torch
 import asyncio
 from typing import Any
 
-
 gpt_costs_per_thousand = {
     'davinci': 0.0200,
     'curie': 0.0020,
@@ -173,7 +172,7 @@ class Flan_T5(LLM):
 
     def __init__(self, config, needs_confirmation=False, disable_tqdm=True):
         """Initializes the model."""
-        self.device="cuda:1"
+        self.device="cuda:6"
         self.config = config
         self.needs_confirmation = needs_confirmation
         self.disable_tqdm = disable_tqdm
@@ -314,8 +313,8 @@ class GPT_Forward(LLM):
         text = []
 
         for prompt_batch in tqdm(prompt_batches, disable=self.disable_tqdm):
-            # text += self.auto_reduce_n(self.__generate_text, prompt_batch, n)
-            text += self.__async_generate(prompt_batch, n)
+            text += self.auto_reduce_n(self.__generate_text, prompt_batch, n)
+            #text += self.__async_generate(prompt_batch, n)
         return text
 
     def complete(self, prompt, n):
@@ -411,7 +410,7 @@ class GPT_Forward(LLM):
                     temperature=0,
                     max_tokens=256,
                     frequency_penalty=0,
-                    presence_penalty=0
+                    presence_penalty=0                    
                     )
                 )
             except Exception as e:

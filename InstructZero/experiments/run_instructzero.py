@@ -1,3 +1,14 @@
+'''
+Instructzerozero原理如下：
+目标：在chatgpt评估
+替代模型：开源的LLM：LLMA等
+输入text在开源的LLM上生成inputtext_embedding，
+利用SobolEngine随机生成prompt_embedding
+inputtext_embedding 与 prompt_embedding cat成一个完整的embedding。
+再通过贝叶斯优化，X_train:embedding; Y_train: scores 不断优化X_train使得Y_train最大
+最后解码成离散的prompt 放入chatgpt中评估。
+'''
+
 import random
 import torch
 import numpy as np
@@ -22,10 +33,11 @@ import time
 
 from misc import set_all_seed, TASKS, tkwargs, N_INIT, BATCH_SIZE, N_ITERATIONS
 from args import parse_args
-
+import warnings
+warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-    
+device_id = "cuda:6"
+model_path = "/home/yangyong/Prompt/PromptDesign/InstructZero/InstructZero/GPT2"
 class LMForwardAPI:
     def __init__(self, model_name=None, eval_data=None, init_prompt=None, init_qa=None, conf=None, base_conf=None,
                  prompt_gen_data=None, random_proj=None, intrinsic_dim=None, n_prompt_tokens=None, few_shot_data=None, 
@@ -39,36 +51,52 @@ class LMForwardAPI:
         self.ops_model = model_name
         # import pdb; pdb.set_trace()
         if self.ops_model in ["vicuna", "wizardlm", 'openchat']:
+            '''
             self.model = AutoModelForCausalLM.from_pretrained(
                 HF_cache_dir,
                 low_cpu_mem_usage=True,
                 device_map="auto",
+                resume_download=True,
                 **kwargs,
             )
+            '''
+            '''
+            self.model = AutoModelForCausalLM.from_pretrained('gpt2',low_cpu_mem_usage=True,
+                device_map=5,
+                resume_download=True,)
 
+            '''
+            self.model = AutoModelForCausalLM.from_pretrained(model_path)
+            
+            self.model.to(device_id)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, model_max_length=1024,
+                                padding_side="left")
+            '''
             self.tokenizer = AutoTokenizer.from_pretrained(
                                 HF_cache_dir,
                                 model_max_length=1024,
                                 padding_side="left",
                                 use_fast=False,
                             )
+            '''
         else:
             raise NotImplementedError
 
         self.init_token = init_prompt[0] + init_qa[0]
         if self.ops_model in ['wizardlm', 'vicuna', 'openchat']:
-            self.embedding = self.model.get_input_embeddings().weight.clone()
+            self.embedding = self.model.get_input_embeddings().weight.clone().to(device_id)
             input_ids = self.tokenizer(init_prompt, return_tensors="pt").input_ids.cuda()
+            input_ids = input_ids.to(device_id)
             self.init_prompt = self.embedding[input_ids]
             
         ################# setup n_prompts_token #################
         self.n_prompt_tokens = n_prompt_tokens
         self.hidden_size = self.init_prompt.shape[-1]
         print('Shape of initial prompt embedding: {}'.format(self.init_prompt.shape))
-        
+        # >>Shape of initial prompt embedding: torch.Size([1, 1, 768])
         # self.init_prompt = self.init_prompt.reshape(self.n_prompt_tokens * self.hidden_size)
         # Create the template for Vicuna and WizardLM
-        self.count = 0
+        self.count = 0  # hidden_size 768; n_prompt_tokens 5
         self.linear = torch.nn.Linear(intrinsic_dim, self.n_prompt_tokens * self.hidden_size, bias=False)
         if self.ops_model == 'vicuna':
             self.system_prompt = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
@@ -115,8 +143,8 @@ class LMForwardAPI:
             self.few_shot_data = prompt_gen_data
         
         self.best_train_perf = 0.0
-        self.best_dev_perf = 0.0
-        self.best_last_perf = 10
+        self.best_dev_perf = 0.0 #development performance
+        self.best_last_perf = 10 #last performance
         self.best_prompt = None
         self.num_call = 0
         self.best_instruction = None
@@ -151,9 +179,10 @@ class LMForwardAPI:
         # create the input text with the system prompt  
         input_text = f"{self.system_prompt} USER:{self.init_token} ASSISTANT:"
         input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.cuda()
+        input_ids = input_ids.to(device_id)
         input_embed = self.embedding[input_ids]
         prompt_embedding = prompt_embedding.to(device=input_embed.device, dtype=input_embed.dtype)
-        input_embed = torch.cat((prompt_embedding, input_embed), 1)
+        input_embed = torch.cat((prompt_embedding, input_embed), 1) # 这里是prompt + input_text 合并起来组成新的embedding
 
         outputs = self.model.generate(inputs_embeds=input_embed, max_new_tokens=128)
         instruction = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -182,7 +211,7 @@ class LMForwardAPI:
         else:
             if self.api_model in ['chatgpt']: 
                 dev_perf, instruction_score = evaluate.evaluate_prompts(instruction, self.eval_template, self.eval_data, self.demos_template, self.few_shot_data, self.conf['evaluation']['method'], self.conf['evaluation'])
-                dev_perf = dev_perf.sorted()[1][0]
+                dev_perf = dev_perf.sorted()[1][0] # dev_perf[0]:生成的prompt  dev_perf[1]:对应的分数(instruction_score的平均值)
                 self.prompts_set[instruction[0]] = (dev_perf, instruction_score)
             # We will fix the bugs for other api models. Stay tuned!
             # elif api_model in ['llama', 'flan-t5']: 
@@ -196,9 +225,9 @@ class LMForwardAPI:
             self.count += 1
 
         if dev_perf >= self.best_dev_perf:
-            self.best_dev_perf = dev_perf
-            self.best_prompt = copy.deepcopy(tmp_prompt)
-            self.best_instruction = instruction
+            self.best_dev_perf = dev_perf # score
+            self.best_prompt = copy.deepcopy(tmp_prompt) # promot对应的embedding
+            self.best_instruction = instruction  # 解码后的prompt
 
         print('Dev loss: {}. Dev perf: {}. Best dev perf: {}'.format(
             round(float(dev_perf), 4),
@@ -224,7 +253,8 @@ def run(args):
 
     # Get size of the induce data
     induce_data_size = len(induce_data[0])
-    prompt_gen_size = min(int(induce_data_size), 100)
+    #prompt_gen_size = min(int(induce_data_size), 100)
+    prompt_gen_size = min(int(13), 100)
     # Induce data is split into prompt_gen_data and eval_data
     prompt_gen_data, eval_data = data.create_split(
         induce_data, prompt_gen_size)
@@ -232,7 +262,7 @@ def run(args):
     # Data is in the form input: single item, output: list of items
     # For prompt_gen_data, sample a single item from the output list
     prompt_gen_data = prompt_gen_data[0], [random.sample(output, 1)[0]
-                                           for output in prompt_gen_data[1]]
+                                           for output in prompt_gen_data[1]]  #多次一举
     # import pdb; pdb.set_trace()
     demos_template = "Input: [INPUT]\nOutput: [OUTPUT]"
     eval_template = "Instruction: [PROMPT]\n\nInput: [INPUT]\n\nOUTPUT: [OUTPUT]" # change the evaluation template
@@ -240,26 +270,39 @@ def run(args):
     prompt_gen_template = "[full_DEMO]\n\nThe instruction was to?"
     # prompt_gen_template = "[full_DEMO]\n\nWhat was the instruction for the task?"
     # prompt_gen_template = "[full_DEMO]\n\n Please generate appropriate instructions for the task."
-
     base_conf = '../configs/instruction_induction.yaml'
     conf = get_conf(task, eval_data)
-
     # make the demo automatically
     subsampled_data = data.subsample_data(prompt_gen_data, conf['generation']['num_demos'])
     prompt_gen_template = template.InitQATemplate(prompt_gen_template)
     d_template = template.DemosTemplate(demos_template)
-    demos = d_template.fill(subsampled_data)
-    init_qa = [prompt_gen_template.fill(demos)]
-    
+    #'Input: Can you do all these tasks?\nOutput: Would you be able to accomplish all these tasks?'
+    demos = d_template.fill(subsampled_data) #d_template:'Input: [INPUT]\nOutput: [OUTPUT]' 
+    init_qa = [prompt_gen_template.fill(demos)] # prompt_gen_template: '[full_DEMO]\n\nThe instruction was to?'
+    '''
+    " 代码中显示了10组[inputs,outputs],作为示例，这里只显示5组
+    Input: I got what you said.\nOutput: I understood you.\n\n
+    Input: See you tonight.\nOutput: I look forward to meeting you tonight.\n\n
+    Input: I think that this is interesting.\nOutput: It is my opinion that this is interesting.\n\n
+    Input: Please call once you get there.\nOutput: Please call upon your arrival.\n\n
+    Input: She looks like her sister.\nOutput: She resembles her sister.\n\n
+    The instruction was to?"  这里对上述采样后的问答进行 prompt提问生成（由大模型根据之前的Q&A生成prompt）
+    '''
+    # 问题在于采样的Q&A是否存在偏执，
     model_forward_api = LMForwardAPI(model_name=args.model_name, eval_data=eval_data, init_prompt=init_prompt, 
                                     init_qa=init_qa, conf=conf, base_conf=base_conf, prompt_gen_data=prompt_gen_data, random_proj=random_proj, 
                                     intrinsic_dim=intrinsic_dim, n_prompt_tokens=n_prompt_tokens, HF_cache_dir=HF_cache_dir, args=args)
         
-    # start bayesian opt
-    X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(N_INIT)
-    X_return = [model_forward_api.eval(x) for x in X]
-    Y = [X[0] for X in X_return]
-    Y_scores = [X[1].squeeze() for X in X_return]
+    # start bayesian opt 
+    '''
+    这段代码的作用是使用 Sobol 序列生成 N_INIT 个多维点，并将这些点存储在变量 X 中。
+    这些点可以在数值计算、蒙特卡洛模拟或其他需要均匀分布的随机数的应用中使用。
+    '''
+    # 这里的X相当于随机生成的初始化prompt embedding，喂给model_forward_api.eval(x)，然后再与数据集中的input_text concat
+    X = SobolEngine(dimension=intrinsic_dim, scramble=True, seed=0).draw(N_INIT) #TODO done  X怎么连接到前面的输入的
+    X_return = [model_forward_api.eval(x) for x in X] # TODO回答：通过eval中的原有数据接入到chatgpt中
+    Y = [X[0] for X in X_return] #TODO done X_return[i][0]:(dev_perf)
+    Y_scores = [X[1].squeeze() for X in X_return] #TODO done  X_return[i][1]: instruction_score
     
     X = X.to(**tkwargs)
     Y = torch.FloatTensor(Y).unsqueeze(-1).to(**tkwargs)
@@ -312,11 +355,14 @@ def run(args):
             
         print(f"best point {best_points[np.argmax(best_vals)]} \n with EI value {np.max(best_vals)}")
         print(f"Time for CMA-ES {time.time() - start_time}")
+        '''
+        这里的原理是在初步生成的best_vals中进一步筛选
+        '''
         for idx in np.argsort(-1*np.array(best_vals)):
             X_next_point =  torch.from_numpy(best_points[idx]).float().unsqueeze(0)
             # Y_next_point = [model_forward_api.eval(X_next_point)]
             
-            X_next_points_return = [model_forward_api.eval(X_next_point)]
+            X_next_points_return = [model_forward_api.eval(X_next_point)] #X_next_point:prompt embedding
             Y_next_point = [X[0] for X in X_next_points_return]
             Y_scores_next_points = [X[1].squeeze() for X in X_next_points_return]
     

@@ -18,7 +18,7 @@ TASKS=[
 SMOKE_TEST = os.environ.get("SMOKE_TEST")
 ## bayesian opt
 tkwargs = {
-    "device": torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+    "device": torch.device("cuda:6" if torch.cuda.is_available() else "cpu"),
     "dtype": torch.double,
 }
 

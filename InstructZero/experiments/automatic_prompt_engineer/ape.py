@@ -23,8 +23,8 @@ def simple_ape(dataset,
                prompt_gen_mode='forward',
                num_prompts=50,
                eval_rounds=20,
-               prompt_gen_batch_size=200,
-               eval_batch_size=500):
+               prompt_gen_batch_size=2,
+               eval_batch_size=5):
     """
     Function that wraps the find_prompts function to make it easier to use.
     Design goals: include default values for most parameters, and automatically
